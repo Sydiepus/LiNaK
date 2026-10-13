@@ -476,10 +476,10 @@ PIPELINE = [
 
              dict(name="--plots", kind="choice", label="Plots to generate",
                   choices=[
-                      ("1", "1 \u2014 Grotrian diagram only"),
-                      ("2", "2 \u2014 Grotrian + Spectrum"),
-                      ("3", "3 \u2014 Grotrian + Spectrum + Excited\u2194excited Grotrian"),
-                      ("4", "4 \u2014 All four, incl. 3D view (default)"),
+                      ("1", "Grotrian diagram only"),
+                      ("2", "Grotrian + Spectrum"),
+                      ("3", "Grotrian + Spectrum + Excited\u2194excited Grotrian"),
+                      ("4", "All four, incl. 3D view (default)"),
                   ],
                   default="4",
                   help="Cumulative, not exclusive: each option always includes every "
@@ -503,12 +503,17 @@ PIPELINE = [
          outputs=["plots/{el}/{el}_spectra.html"]),
 
     dict(id="orbital3d", label="Orbital viewer", symbol="psi^2", script="orbital3d.py",
-         desc="3D |psi|^2 isosurfaces for each Rydberg state.",
+         desc="3D orbital viewer for each Rydberg state (volume or isosurface).",
          positional=lambda el: [el],
          flags=[
+             dict(name="--render", kind="choice", label="Rendering",
+                  choices=["volume", "isosurface"], default="volume",
+                  help="volume: WebGL2 raymarched volume (default, works offline). "
+                       "isosurface: classic Plotly |psi|^2 level-set surfaces."),
              dict(name="--n-max", kind="int", label="Max n", default="10"),
-             dict(name="--grid", kind="int", label="Grid points per axis", default="55"),
-             dict(name="--isovalue", kind="float", label="Isovalue (outer)", default="0.04"),
+             dict(name="--grid", kind="int", label="Grid points per axis", default="",
+                  help="Blank = 96 (volume, max 128) or 55 (isosurface, max 75)."),
+             dict(name="--isovalue", kind="float", label="Lowest level / outer isovalue", default="0.04"),
              dict(name="--data-dir", kind="str", label="Data directory", default="data_json"),
          ],
          outputs=["plots/{el}/{el}_orbital3d.html"]),
@@ -625,9 +630,10 @@ STAGE_PHYSICS = {
         "using each transition's real wavelength and oscillator strength."
     ),
     "orbital3d": (
-        "Draws hydrogen-like |psi|^2 isosurfaces (with quantum-defect-corrected "
-        "n*) for any Rydberg state -- a teaching visualization of orbital "
-        "shape, not a quantitative multi-electron orbital."
+        "Draws the Rydberg-state orbital (exact Coulomb radial function at the "
+        "quantum-defect n*, spin-orbit m_j or spin-free m_l angular part) as a "
+        "volume or |psi|^2 isosurfaces -- outside the ionic core only; the core "
+        "region is not modelled."
     ),
     "compare": (
         "Builds or updates the cross-element CompTable: D-line wavelengths, "
