@@ -19,7 +19,7 @@
     "alpha0_expt_au": 162.7,
     "C6_au": 1557.9,
     "C6_expt_au": 1556.0,
-    "tol_rel_pipeline": 1e-5,
+    "tol_rel_pipeline": 1e-05,
     "tol_rel_expt": 0.005
   },
   "dline_lifetime": {
@@ -33,15 +33,25 @@
         "A_total_s": 61590053.24455138
       }
     },
-    "tol_rel": 1e-6,
+    "tol_rel": 1e-06,
     "expt_lifetime_ns": 16.23,
     "tol_rel_expt": 0.02
   },
   "feshbach": {
     "a_bg_a0": 54.54,
     "resonances": [
-      {"label": "s-wave 905 G", "B0_G": 905.0, "Delta_G": 1.04, "a_bg_a0": 54.54},
-      {"label": "s-wave 851 G", "B0_G": 851.0, "Delta_G": 0.0097, "a_bg_a0": 54.54}
+      {
+        "label": "s-wave 905 G",
+        "B0_G": 905.0,
+        "Delta_G": 1.04,
+        "a_bg_a0": 54.54
+      },
+      {
+        "label": "s-wave 851 G",
+        "B0_G": 851.0,
+        "Delta_G": 0.0097,
+        "a_bg_a0": 54.54
+      }
     ],
     "checks": {
       "zero_crossing_offset": "B0 + Delta",
@@ -49,7 +59,7 @@
       "a_far_field_B": 0.0,
       "a_far_field": 54.54
     },
-    "tol_abs_a0": 1e-9
+    "tol_abs_a0": 1e-09
   },
   "continuum_sanity": {
     "T_K": 300.0,
@@ -59,42 +69,54 @@
       "10s": {
         "Gamma_PI_s": 4.603494,
         "Gamma_SFI_s": 1.575633,
-        "Gamma_mix_PI_s": 23.82736,
-        "Gamma_mix_SFI_s": 8.165775,
-        "Gamma_ion_s": 38.172263
+        "Gamma_mix_PI_s": 10.220686,
+        "Gamma_mix_SFI_s": 3.503561,
+        "Gamma_ion_s": 19.903374
       },
       "20s": {
         "Gamma_PI_s": 216.377096,
         "Gamma_SFI_s": 88.373351,
-        "Gamma_mix_PI_s": 161.856735,
-        "Gamma_mix_SFI_s": 65.506727,
-        "Gamma_ion_s": 532.113909
+        "Gamma_mix_PI_s": 143.400042,
+        "Gamma_mix_SFI_s": 58.03594,
+        "Gamma_ion_s": 506.186429
       },
       "25s": {
         "Gamma_PI_s": 247.249239,
         "Gamma_SFI_s": 123.489905,
-        "Gamma_mix_PI_s": 69.88885,
-        "Gamma_mix_SFI_s": 34.854154,
-        "Gamma_ion_s": 475.482148
+        "Gamma_mix_PI_s": 63.532408,
+        "Gamma_mix_SFI_s": 31.683833,
+        "Gamma_ion_s": 465.955384
       }
     },
-    "tol_rel": 1e-5
+    "tol_rel": 1e-05
   },
   "rydberg_dyn": {
     "farley_wing_hz": 2416.665774,
     "states": {
-      "20s": {"shift_dyn_hz": 3345.467418, "tol_rel": 0.05},
-      "40s": {"shift_dyn_hz": 2365.473091, "tol_rel": 0.05}
+      "20s": {
+        "shift_dyn_hz": 3345.467418,
+        "tol_rel": 0.05
+      },
+      "40s": {
+        "shift_dyn_hz": 2365.473091,
+        "tol_rel": 0.05
+      }
     },
-    "tol_fw_rel": 1e-6
+    "tol_fw_rel": 1e-06
   },
   "fosc_quality": {
     "max_fraction_coulomb": 0.02,
     "min_numerov_or_nist_channels": 10000,
     "literature_min_rows": 10,
     "mid_n_nist_lines": [
-      {"lower": "3s", "upper": "5p"},
-      {"lower": "3s", "upper": "6p"}
+      {
+        "lower": "3s",
+        "upper": "5p"
+      },
+      {
+        "lower": "3s",
+        "upper": "6p"
+      }
     ]
   }
 }

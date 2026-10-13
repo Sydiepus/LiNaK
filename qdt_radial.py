@@ -16,6 +16,9 @@ from functools import lru_cache
 
 import numpy as np
 
+# np.trapz was removed in NumPy 2.4; np.trapezoid exists from NumPy 2.0
+_trapezoid = getattr(np, 'trapezoid', None) or np.trapz
+
 # Angular / spectroscopic maps
 L_CHAR = {"s": 0, "p": 1, "d": 2, "f": 3, "g": 4, "h": 5}
 L_INT = {v: k for k, v in L_CHAR.items()}
@@ -90,7 +93,21 @@ def radial_wavefunction(n: int, l: int, delta: float,
     if not np.all(np.isfinite(u)):
         return None, None
 
-    norm = math.sqrt(max(np.trapz(u * u, r), 1e-30))
+    # The inward solution at a non-integer n* is the decaying Whittaker function,
+    # which is IRREGULAR at the origin (u ~ r^-l). Inside the classical inner
+    # turning point it has no physical meaning (and the real core is non-Coulombic
+    # anyway), but it can dominate ∫u² for l >= 2 with small defects (e.g. Na 6d:
+    # 39 % of the norm; 6f: 100 %), shrinking the physical outer lobes by up to
+    # orders of magnitude. Standard QDT remedy: use the Coulomb function only
+    # outside r_c and normalise there (agrees with the analytic Seaton norm to <0.5 %).
+    # Inner classical turning point for charge Z: (n*^2 / Z) (1 - sqrt(1 - l(l+1)/n*^2));
+    # the 1 a0 floor scales as 1/Z (hydrogenic scaling r -> Z r).
+    disc = 1.0 - l * (l + 1) / (ns * ns)
+    r_in = (ns * ns / z) * (1.0 - math.sqrt(disc)) if disc > 0 else ns * ns / z
+    r_c = max(r_in, 1.0 / z)
+    u = np.where(r >= r_c, u, 0.0)
+
+    norm = math.sqrt(max(_trapezoid(u * u, r), 1e-30))
     u = u / norm
     # Overall phase: make the outer lobe positive
     if u[n_grid // 2] < 0:
@@ -129,7 +146,7 @@ def radial_dipole(n_lower, l_lower, delta_lower,
     r = r1[mask]
     u_l = u1[mask]
     u_u = np.interp(r, r2, u2)
-    return float(np.trapz(u_l * u_u * r, r))
+    return float(_trapezoid(u_l * u_u * r, r))
 
 
 def numerov_fosc(n_upper, l_upper, n_lower, l_lower,
