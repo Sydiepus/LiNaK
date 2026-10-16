@@ -27,9 +27,8 @@ from constants import (
     C6_EXPT,
 )
 
-# ============================================================================
+
 # ELEMENT / SPECTROSCOPY TABLES (not universal CODATA — stay here)
-# ============================================================================
 
 L_CHAR = {'s': 0, 'p': 1, 'd': 2, 'f': 3, 'g': 4}
 
@@ -74,9 +73,9 @@ ALPHA_CORE_AU = {
 }
 CORE_ELECTRONS = {'Li': 2, 'Na': 10, 'K': 18, 'Rb': 36, 'Cs': 54, 'Fr': 86}
 
-# ============================================================================
+
 # CONVERSIONS & HELPERS
-# ============================================================================
+
 
 def omega_au_from_nm(wl_nm):
     """Convert wavelength in nm to angular frequency in atomic units."""
@@ -142,10 +141,8 @@ def coulomb_fosc(n_upper, l_upper, n_lower, l_lower, delta_upper, delta_lower):
     return max(f, 0.0)
 
 
-# ============================================================================
-# NIST F-VALUE LOADER  (shared by polarizability, blackbody, lifetimes)
-# ============================================================================
 
+# NIST F-VALUE LOADER  (shared by polarizability, blackbody, lifetimes)
 
 def unwrap_asd_field(val):
     """Normalize one NIST ASD cell (Excel '=""…""' wrapping, quotes, brackets)."""
@@ -463,6 +460,7 @@ def load_nist_fvalues(element, f_values_dir='f_values', verbose=True,
     _nist_Ju_fik  = {}
     _nist_wl2     = {}
     _nist_accs    = {}
+    _nist_line_jl = {}   # (lo_nl, up_nl, J_up, J_lo) -> [(gA, fik, wl, acc)]
     _nist_jt_gA   = {}
     _nist_jt_var  = {}
     _nist_jt_wl   = {}
@@ -565,6 +563,9 @@ def load_nist_fvalues(element, f_values_dir='f_values', verbose=True,
                 else:
                     _nist_Ju_fik[_key][_J_up] = 0.5 * (_prev + _fik)
             _nist_Ju_wl[_key][_J_up]  = _wl
+            _J_lo_line = _Ji if _ei <= _ek else _Jk
+            _nist_line_jl.setdefault((_key[0], _key[1], _J_up, _J_lo_line), []).append(
+                (_gA, _fik, _wl, _acc or 'unknown'))
             _nist_Ju_accs[_key].setdefault(_J_up, []).append((_acc or 'unknown', _delta))
             _nist_accs[_key].append((_acc or 'unknown', _delta))
 
@@ -684,6 +685,29 @@ def load_nist_fvalues(element, f_values_dir='f_values', verbose=True,
             nist_acc_j[jkey] = (min(_jaccs, key=lambda x: x[1])[0]
                                 if _jaccs else 'unknown')
 
+    # Line-level f (additive): one value per (lower J, upper J) line
+    nist_fosc_jl = {}
+    for _k, _lst in _nist_line_jl.items():
+        _lo_nl, _up_nl, _Jup, _Jlo = _k
+        try:
+            if '/' in _Jlo:
+                _a, _b = (int(x) for x in _Jlo.split('/'))
+                _g_lo = 2 * _a // _b + 1
+            else:
+                _g_lo = 2 * int(_Jlo) + 1
+        except (ValueError, ZeroDivisionError):
+            continue
+        _fiks = [x[1] for x in _lst if x[1] is not None and x[1] > 0]
+        _gAs = sum(x[0] for x in _lst if x[0] and x[0] > 0)
+        if _fiks:
+            _f = sum(_fiks) / len(_fiks)
+        elif _gAs > 0:
+            _f = _gAs * _lst[-1][2]**2 / (NIST_PREF * _g_lo)
+        else:
+            continue
+        _best = min(_lst, key=lambda x: ACC_UNCERTAINTY.get(x[3], 0.50))[3]
+        nist_fosc_jl[_k] = (_f, _best)
+
     # Ion-only term+J table (neutral callers never see/use these keys)
     if _is_ion:
         for _jt in set(list(_nist_jt_gA) + list(_nist_jt_fik)):
@@ -719,6 +743,26 @@ def load_nist_fvalues(element, f_values_dir='f_values', verbose=True,
             nist_acc_jt[_jt] = (min(_jaccs, key=lambda x: x[1])[0]
                                 if _jaccs else 'unknown')
 
+    fosc_legacy = dict(nist_fosc)
+    n_mult_fixed = n_mult_dropped = 0
+    if not _is_ion and nist_fosc_jl:
+        from qdt_radial import build_true_multiplet_f
+        _true = build_true_multiplet_f(nist_fosc_jl)
+        for _key in list(nist_fosc):
+            _ml = re.match(r'^\d+([spdfg])$', _key[0])
+            _mu = re.match(r'^\d+([spdfg])$', _key[1])
+            if not _ml or not _mu:
+                continue
+            if _key in _true:
+                if abs(_true[_key] / nist_fosc[_key] - 1.0) > 1e-9:
+                    n_mult_fixed += 1
+                nist_fosc[_key] = _true[_key]
+            elif _ml.group(1) != 's' and _mu.group(1) != 's':
+                del nist_fosc[_key]
+                nist_acc.pop(_key, None)
+                nist_sigma.pop(_key, None)
+                n_mult_dropped += 1
+
     n_prec = 0
     if apply_precision:
         for _key, _jmap in PRECISION_FOSC_J.get(element, {}).items():
@@ -739,6 +783,9 @@ def load_nist_fvalues(element, f_values_dir='f_values', verbose=True,
             if n_fik_disagree:
                 msg += f", {n_fik_disagree} >5% vs gA->f"
             msg += ")"
+        if n_mult_fixed or n_mult_dropped:
+            msg += (f"  (multiplet f rebuilt from lines: {n_mult_fixed} corrected, "
+                    f"{n_mult_dropped} removed)")
         if n_prec:
             msg += f"  (+{n_prec} precision D-line overrides)"
         if nist_fosc_jt:
@@ -749,14 +796,12 @@ def load_nist_fvalues(element, f_values_dir='f_values', verbose=True,
         fosc=nist_fosc, acc=nist_acc, sigma=nist_sigma,
         fosc_j=nist_fosc_j, acc_j=nist_acc_j, sigma_j=nist_sigma_j,
         fosc_jt=nist_fosc_jt, acc_jt=nist_acc_jt,
+        fosc_jl=nist_fosc_jl, fosc_legacy=fosc_legacy,
         fosc_line={}, acc_line={}, sigma_line={}, gA_line={},
         lines=[],
     )
 
-
-# ============================================================================
 # LITERATURE OVERLAY (curated f above Coulomb / Numerov)
-# ============================================================================
 
 def load_literature_fvalues(element, f_values_dir='f_values', verbose=True):
     """
@@ -813,9 +858,8 @@ def load_literature_fvalues(element, f_values_dir='f_values', verbose=True):
                 n_rows=len(raw.get('transitions', [])), path=path)
 
 
-# ============================================================================
+
 # ELEMENT DATA LOADER
-# ============================================================================
 
 def load_element(element, data_dir='data_json', f_values_dir='f_values', verbose=True):
     """
@@ -869,8 +913,11 @@ def load_element(element, data_dir='data_json', f_values_dir='f_values', verbose
     nist = load_nist_fvalues(element, f_values_dir=f_values_dir, verbose=verbose)
     lit  = load_literature_fvalues(element, f_values_dir=f_values_dir, verbose=verbose)
 
-    from qdt_radial import fit_numerov_scale_from_nist
+    from qdt_radial import fit_numerov_scale_from_nist, fit_numerov_scales_by_type
     numerov_cal = fit_numerov_scale_from_nist(qd, nist['fosc'])
+    nist_fosc_jl_ = nist.get('fosc_jl') or {}
+    ls_mode = bool(nist_fosc_jl_) and not nist.get('fosc_jt')
+    numerov_cal_types = fit_numerov_scales_by_type(qd, nist['fosc']) if ls_mode else None
     if verbose:
         print(f"  {element}: Numerov NIST-overlap scale = {numerov_cal['scale']:.4f} "
               f"(n_pairs={numerov_cal['n_pairs']}, applied={numerov_cal['applied']}, "
@@ -897,6 +944,9 @@ def load_element(element, data_dir='data_json', f_values_dir='f_values', verbose
         literature_acc_j  = lit['acc_j'],
         numerov_scale   = float(numerov_cal['scale']),
         numerov_cal     = numerov_cal,
+        nist_fosc_jl    = nist_fosc_jl_,
+        ls_mode         = ls_mode,
+        numerov_cal_types = numerov_cal_types,
         precision_fosc_j = PRECISION_FOSC_J.get(element, {}),
         alpha_core_au   = ALPHA_CORE_AU.get(element, 0.0),
         core_electrons  = CORE_ELECTRONS.get(element, 0),
@@ -957,9 +1007,8 @@ def default_excited_label(data, all_transitions=None):
     return candidates[0]
 
 
-# ============================================================================
+
 # OSCILLATOR STRENGTH LOOKUP
-# ============================================================================
 
 def get_fosc(lower_label, upper_label, lower_n, upper_n,
              lower_l, upper_l, nist_fosc, qd, upper_J_str=None,
@@ -1090,9 +1139,52 @@ def get_fosc(lower_label, upper_label, lower_n, upper_n,
     return 0.0, 'unknown'
 
 
-# ============================================================================
+
 # TRANSITION NETWORK FOR ONE STATE
-# ============================================================================
+
+def _ls_state_term(t, state_label, data):
+    """
+    (f_ik, source, sign) for the transition record `t` seen from `state_label`, resolved into
+    fine-structure lines. f_ik > 0; sign = +1 upward (state is the lower level), -1 downward
+    (the g_lower/g_upper emission factor is included in f_ik).
+    """
+    from qdt_radial import (parse_J2_set, nist_line_f, ls_line_f, numerov_scale_for)
+    ul, ll = t['upper_label'], t['lower_label']
+    Lu, Ll = L_CHAR.get(t['upper_l'], -1), L_CHAR.get(t['lower_l'], -1)
+    if Lu < 0 or Ll < 0 or abs(Lu - Ll) != 1:
+        return 0.0, 'unknown', 1
+    JU = parse_J2_set(t.get('upper_J'), Lu)
+    JL = parse_J2_set(t.get('lower_J'), Ll)
+    lo_nl, up_nl = parse_state_nl(ll), parse_state_nl(ul)
+    jl_data = data['nist_fosc_jl']
+    f_mult = None
+    src_mult = 'unknown'
+    lines = {}
+    src_line = None
+    for jl in JL:
+        for ju in JU:
+            hit = nist_line_f(jl_data, lo_nl, up_nl, Lu, ju, Ll, jl)
+            if hit is not None:
+                lines[(jl, ju)] = hit[0]
+                src_line = 'NIST'
+                continue
+            if f_mult is None:
+                scale = numerov_scale_for(data.get('numerov_cal_types'), t['lower_l'], t['upper_l'])
+                f_mult, src_mult = get_fosc(
+                    ll, ul, t['lower_n'], t['upper_n'], t['lower_l'], t['upper_l'],
+                    data['nist_fosc'], data['qd'], upper_J_str=None,
+                    literature_fosc=data.get('literature_fosc') or None,
+                    numerov_scale=scale)
+            lines[(jl, ju)] = ls_line_f(f_mult, Lu, ju, Ll, jl) if f_mult else 0.0
+    gL = sum(j + 1 for j in JL)
+    gU = sum(j + 1 for j in JU)
+    src = src_mult if (f_mult is not None) else (src_line or 'NIST')
+    if ul == state_label:
+        f = sum((jl + 1) / gU * f_line for (jl, ju), f_line in lines.items())
+        return f, src, -1
+    f = sum((jl + 1) / gL * f_line for (jl, ju), f_line in lines.items())
+    return f, src, +1
+
 
 def build_transitions_for_state(state_label, data, all_transitions):
     """
@@ -1133,6 +1225,20 @@ def build_transitions_for_state(state_label, data, all_transitions):
         lu      = t['upper_l']
         ll_char = t['lower_l']
         upper_J = t.get('upper_J')
+
+        if data.get('ls_mode'):
+            f, src, sign = _ls_state_term(t, state_label, data)
+            if f <= 0:
+                continue
+            result.append(dict(
+                delta_E_au  = dE_au,
+                fosc        = f,
+                sign        = sign,
+                other_label = other_label,
+                source      = src,
+                wl_nm       = t['wavelength_nm'],
+            ))
+            continue
 
         if ul == state_label:
             f, src = get_fosc(other_label, state_label, nl, nu,
@@ -1187,10 +1293,7 @@ def build_transitions_for_state(state_label, data, all_transitions):
 
     return result
 
-
-# ============================================================================
 # DYNAMIC POLARIZABILITY
-# ============================================================================
 
 def alpha_real(omega_au, transitions_list):
     """

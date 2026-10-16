@@ -69,23 +69,23 @@
       "10s": {
         "Gamma_PI_s": 4.603494,
         "Gamma_SFI_s": 1.575633,
-        "Gamma_mix_PI_s": 10.220686,
-        "Gamma_mix_SFI_s": 3.503561,
-        "Gamma_ion_s": 19.903374
+        "Gamma_mix_PI_s": 10.282938,
+        "Gamma_mix_SFI_s": 3.524669,
+        "Gamma_ion_s": 19.986734
       },
       "20s": {
         "Gamma_PI_s": 216.377096,
         "Gamma_SFI_s": 88.373351,
-        "Gamma_mix_PI_s": 143.400042,
-        "Gamma_mix_SFI_s": 58.03594,
-        "Gamma_ion_s": 506.186429
+        "Gamma_mix_PI_s": 74.132754,
+        "Gamma_mix_SFI_s": 30.353252,
+        "Gamma_ion_s": 409.236452
       },
       "25s": {
         "Gamma_PI_s": 247.249239,
         "Gamma_SFI_s": 123.489905,
-        "Gamma_mix_PI_s": 63.532408,
-        "Gamma_mix_SFI_s": 31.683833,
-        "Gamma_ion_s": 465.955384
+        "Gamma_mix_PI_s": 51.728898,
+        "Gamma_mix_SFI_s": 25.893127,
+        "Gamma_ion_s": 448.361169
       }
     },
     "tol_rel": 1e-05
@@ -94,11 +94,11 @@
     "farley_wing_hz": 2416.665774,
     "states": {
       "20s": {
-        "shift_dyn_hz": 3345.467418,
+        "shift_dyn_hz": 3911.319992,
         "tol_rel": 0.05
       },
       "40s": {
-        "shift_dyn_hz": 2365.473091,
+        "shift_dyn_hz": 2277.980915,
         "tol_rel": 0.05
       }
     },

@@ -271,10 +271,6 @@ def fit_numerov_scale_from_nist(qd: dict, nist_fosc: dict,
     info["median_ratio_raw"] = float(np.median(arr))
     info["p16"] = float(np.percentile(arr, 16))
     info["p84"] = float(np.percentile(arr, 84))
-
-    # Robust fit: median over ratios already inside the physical window.
-    # Pathological weak-line ratios (near poles / tiny Numerov f) are excluded
-    # from the estimator but still reported in p16/p84 of the raw set.
     inliers = arr[(arr >= scale_lo) & (arr <= scale_hi)]
     info["n_inliers"] = int(inliers.size)
     if inliers.size < min_pairs:
@@ -303,3 +299,284 @@ def numerov_fosc_scaled(n_upper, l_upper, n_lower, l_lower,
     if not math.isfinite(s) or s <= 0:
         return f
     return f * s
+
+
+
+# Fine-structure (LS-coupling) line strengths and per-transition-type scale
+
+def _fact(n2: int) -> float:
+    """(n2/2)! for a non-negative integer n2 that is even (i.e. integer argument)."""
+    return float(math.factorial(n2 // 2))
+
+
+def _tri2(a2: int, b2: int, c2: int) -> float:
+    """Triangle coefficient Delta(abc) with doubled arguments (2a, 2b, 2c)."""
+    return math.sqrt(_fact(a2 + b2 - c2) * _fact(a2 - b2 + c2) * _fact(-a2 + b2 + c2)
+                     / _fact(a2 + b2 + c2 + 2))
+
+
+def wigner_6j(j1x2: int, j2x2: int, j3x2: int, j4x2: int, j5x2: int, j6x2: int) -> float:
+    """
+    Wigner 6j symbol {j1 j2 j3; j4 j5 j6} by the Racah formula.
+    Arguments are DOUBLED angular momenta (2j), so half-integers are plain ints.
+    Returns 0.0 if any triad violates the triangle/parity conditions.
+    """
+    a = (j1x2, j2x2, j3x2)
+    b = (j1x2, j5x2, j6x2)
+    c = (j4x2, j2x2, j6x2)
+    d = (j4x2, j5x2, j3x2)
+    for tr in (a, b, c, d):
+        x, y, z = tr
+        if (x + y + z) % 2 or z > x + y or z < abs(x - y):
+            return 0.0
+    pref = _tri2(*a) * _tri2(*b) * _tri2(*c) * _tri2(*d)
+    t_min = max(sum(a), sum(b), sum(c), sum(d)) // 2
+    t_max = min(j1x2 + j2x2 + j4x2 + j5x2, j2x2 + j3x2 + j5x2 + j6x2,
+                j3x2 + j1x2 + j6x2 + j4x2) // 2
+    s = 0.0
+    for t in range(t_min, t_max + 1):
+        den = (math.factorial(t - sum(a) // 2) * math.factorial(t - sum(b) // 2)
+               * math.factorial(t - sum(c) // 2) * math.factorial(t - sum(d) // 2)
+               * math.factorial((j1x2 + j2x2 + j4x2 + j5x2) // 2 - t)
+               * math.factorial((j2x2 + j3x2 + j5x2 + j6x2) // 2 - t)
+               * math.factorial((j3x2 + j1x2 + j6x2 + j4x2) // 2 - t))
+        s += (-1) ** t * math.factorial(t + 1) / den
+    return pref * s
+
+
+def ls_line_weight(Lu: int, Ju2: int, Ll: int, Jl2: int) -> float:
+    """
+    Fraction of the multiplet decay rate of an upper level (Lu, J_u) that goes to
+    the lower fine-structure level (Ll, J_l)  [spin S = 1/2]:
+
+        w = (2 Lu + 1)(2 Jl + 1) { Lu Ju S ; Jl Ll 1 }^2
+
+    Ju2/Jl2 are doubled J. Sum over Jl for fixed Ju is 1 (checked in the tests).
+    """
+    s = wigner_6j(2 * Lu, Ju2, 1, Jl2, 2 * Ll, 2)
+    return (2 * Lu + 1) * (Jl2 + 1) * s * s
+
+
+def allowed_J2(L: int):
+    """Doubled J values for one electron with orbital L and spin 1/2."""
+    return [1] if L == 0 else [2 * L - 1, 2 * L + 1]
+
+
+def parse_J2_set(J_str, L: int):
+    """
+    '3/2' -> [3]; '5/2,7/2' -> [5, 7]; None/'' -> every allowed J of L
+    (an unresolved multiplet: statistical average over its levels).
+    Values not allowed for L are dropped; empty result falls back to all allowed.
+    """
+    allowed = allowed_J2(L)
+    if not J_str:
+        return allowed
+    out = []
+    for tok in str(J_str).split(','):
+        tok = tok.strip()
+        try:
+            if '/' in tok:
+                num, den = tok.split('/')
+                v = (2 * int(num)) // int(den)
+            else:
+                v = 2 * int(tok)
+        except ValueError:
+            continue
+        if v in allowed and v not in out:
+            out.append(v)
+    return out or allowed
+
+
+def ls_group_branching(Lu: int, Ju2_set, Ll: int, Jl2_set):
+    """
+    Rate of an upper *group* of levels (statistical mix of Ju2_set) into a lower
+    group (Jl2_set), as a fraction of the multiplet-to-multiplet rate A_mult.
+
+    Returns (ratio, g_upper, g_lower) with g = sum(2J+1) over each group.
+    ratio = sum_Ju (g_Ju / g_U) sum_Jl w(Ju->Jl); ratio is 1 for full multiplets
+    and 0 for fully forbidden (|dJ| > 1) combinations.
+    """
+    gU = sum(j + 1 for j in Ju2_set)
+    gL = sum(j + 1 for j in Jl2_set)
+    ratio = 0.0
+    for ju in Ju2_set:
+        for jl in Jl2_set:
+            ratio += (ju + 1) / gU * ls_line_weight(Lu, ju, Ll, jl)
+    return ratio, gU, gL
+
+
+def fit_numerov_scales_by_type(qd: dict, nist_fosc: dict,
+                               min_pairs: int = 5, min_f: float = 1e-8,
+                               scale_lo: float = 0.25, scale_hi: float = 4.0,
+                               z_core: float = 1.0, gate: float = 2.5) -> dict:
+    """
+    Per-transition-type renormalisation of Numerov multiplet f against NIST.
+
+    Same estimator as fit_numerov_scale_from_nist (median of inlier ratios
+    f_NIST / f_Numerov over NIST multiplet pairs) but
+
+      * pairs are restricted to the SAME domain in which the scale is applied
+        (n*_lower > gate and n*_upper > gate), so deep-core levels such as
+        Na 3s/3p, which the Numerov branch never handles, no longer bias it;
+      * the median is taken separately per (l_lower, l_upper) type; a type with
+        fewer than `min_pairs` inliers falls back to the pooled (gated) median.
+
+    Returns {'global': info, 'types': {(l_lo, l_up): info}} where each info has
+    scale, n_pairs, n_inliers, p16, p84, rel_spread (= (p84-p16)/(2 median)).
+    """
+    pairs = {}
+    for key, f_nist in (nist_fosc or {}).items():
+        if not isinstance(key, tuple) or len(key) != 2:
+            continue
+        try:
+            f_nist = float(f_nist)
+        except (TypeError, ValueError):
+            continue
+        if f_nist < min_f:
+            continue
+        a = _parse_nl_token(key[0]); b = _parse_nl_token(key[1])
+        if a is None or b is None or abs(a[1] - b[1]) != 1:
+            continue
+        da = float(qd.get(L_INT.get(a[1], "s"), 0.0))
+        db = float(qd.get(L_INT.get(b[1], "p"), 0.0))
+        nsa, nsb = n_star(a[0], da), n_star(b[0], db)
+        if nsb > nsa:
+            lo, up, dl, du = a, b, da, db
+        else:
+            lo, up, dl, du = b, a, db, da
+        if min(nsa, nsb) <= gate:
+            continue
+        f_num = numerov_fosc(up[0], up[1], lo[0], lo[1], du, dl, z_core=z_core)
+        if f_num < min_f or not math.isfinite(f_num):
+            continue
+        pairs.setdefault((L_INT[lo[1]], L_INT[up[1]]), []).append(f_nist / f_num)
+
+    def _info(vals):
+        arr = np.asarray(vals, dtype=float)
+        inl = arr[(arr >= scale_lo) & (arr <= scale_hi)]
+        info = {"n_pairs": int(arr.size), "n_inliers": int(inl.size), "scale": 1.0,
+                "applied": False, "p16": None, "p84": None, "rel_spread": None}
+        if arr.size:
+            info["p16"], info["p84"] = (float(x) for x in np.percentile(arr, [16, 84]))
+        if inl.size >= min_pairs:
+            med = float(np.median(inl))
+            lo16, hi84 = np.percentile(inl, [16, 84])
+            info.update(scale=med, applied=True,
+                        rel_spread=float((hi84 - lo16) / (2.0 * med)))
+        return info
+
+    allv = [r for v in pairs.values() for r in v]
+    glob = _info(allv) if allv else {"n_pairs": 0, "n_inliers": 0, "scale": 1.0,
+                                     "applied": False, "p16": None, "p84": None,
+                                     "rel_spread": None}
+    types = {}
+    for k, v in pairs.items():
+        info = _info(v)
+        info["source"] = "type" if info["applied"] else "global_fallback"
+        if not info["applied"]:
+            info["scale"] = glob["scale"]
+        types[k] = info
+    return {"global": glob, "types": types}
+
+
+def numerov_scale_for(cal: dict, l_lower: str, l_upper: str) -> float:
+    """Scale for a (lower l, upper l) type from fit_numerov_scales_by_type()."""
+    if not cal:
+        return 1.0
+    t = cal.get("types", {}).get((l_lower, l_upper))
+    if t is not None:
+        return float(t["scale"])
+    return float(cal.get("global", {}).get("scale", 1.0))
+
+
+def build_true_multiplet_f(fosc_jl: dict) -> dict:
+    """
+    Lower-multiplet-averaged absorption f for nl -> n'l' from NIST LINE data:
+
+        f_mult = sum_{Ju,Jl} g_Jl f_line(Jl -> Ju) / sum_{Jl} g_Jl
+
+    fosc_jl maps (lo_nl, up_nl, J_up, J_lo) -> (f_line, acc). A missing line of an
+    otherwise listed upper level is completed with the LS 6j ratio
+    (f_line ~ w(Ju,Jl)/(2Jl+1)); a pair is skipped if any allowed upper level has
+    no listed line at all. Returns {(lo_nl, up_nl): f_mult}.
+
+    NOTE: alpha_core's nist_fosc (sum over J_up of the lower-J-AVERAGED mean) equals
+    this only when the lower or the upper level has a single J (s->p, p->s); for
+    p->d, d->f, d->p, f->d it is larger by 1.45-1.48 (checked on Na NIST lines).
+    """
+    def _j2(s):
+        a, b = s.split('/') if '/' in s else (s, '1')
+        return (2 * int(a)) // int(b)
+
+    groups = {}
+    for (lo, up, Ju, Jl), (f, _acc) in (fosc_jl or {}).items():
+        try:
+            groups.setdefault((lo, up), {})[(_j2(Ju), _j2(Jl))] = float(f)
+        except (ValueError, ZeroDivisionError):
+            continue
+    out = {}
+    for (lo, up), d in groups.items():
+        a = _parse_nl_token(lo); b = _parse_nl_token(up)
+        if a is None or b is None or abs(a[1] - b[1]) != 1:
+            continue
+        Ll, Lu = a[1], b[1]
+        num, ok = 0.0, True
+        for ju in allowed_J2(Lu):
+            lines = {}
+            for jl in allowed_J2(Ll):
+                w = ls_line_weight(Lu, ju, Ll, jl)
+                if w > 1e-12:
+                    lines[jl] = w
+            if not lines:
+                continue
+            known = [jl for jl in lines if (ju, jl) in d]
+            if not known:
+                ok = False
+                break
+            jk = known[0]
+            for jl, w in lines.items():
+                if (ju, jl) in d:
+                    f = d[(ju, jl)]
+                else:
+                    f = d[(ju, jk)] * (w / (jl + 1)) / (lines[jk] / (jk + 1))
+                num += (jl + 1) * f
+        if ok and num > 0:
+            out[(lo, up)] = num / sum(j + 1 for j in allowed_J2(Ll))
+    return out
+
+
+def ls_line_f(f_mult: float, Lu: int, ju2: int, Ll: int, jl2: int) -> float:
+    """
+    Absorption f of ONE fine-structure line (Ll, Jl) -> (Lu, Ju) from the multiplet f
+    (lower-multiplet averaged) in LS coupling:
+
+        f_line = f_mult (2Ll+1)/(2Lu+1) * w(Ju->Jl) * (2Ju+1)/(2Jl+1)
+    """
+    return (f_mult * (2 * Ll + 1) / (2 * Lu + 1)
+            * ls_line_weight(Lu, ju2, Ll, jl2) * (ju2 + 1) / (jl2 + 1))
+
+
+def nist_line_f(fosc_jl: dict, lo_nl: str, up_nl: str, Lu: int, ju2: int, Ll: int, jl2: int):
+    """
+    One NIST line f for (lo_nl, Jl) -> (up_nl, Ju).  fosc_jl[(lo, up, 'J_up', 'J_lo')] = (f, acc).
+    Returns (f, acc, reconstructed): the listed line, else the value implied by another listed
+    lower-J line of the same upper level through f ~ w(Ju,Jl)/(2Jl+1) (LS 6j), else None.
+    A line forbidden in LS (|dJ| > 1) returns (0.0, None, False).
+    """
+    w = ls_line_weight(Lu, ju2, Ll, jl2)
+    if w <= 1e-12:
+        return (0.0, None, False)
+    Ju = f"{ju2}/2"
+    hit = (fosc_jl or {}).get((lo_nl, up_nl, Ju, f"{jl2}/2"))
+    if hit:
+        return (hit[0], hit[1], False)
+    for j2 in allowed_J2(Ll):
+        if j2 == jl2:
+            continue
+        wk = ls_line_weight(Lu, ju2, Ll, j2)
+        if wk <= 1e-12:
+            continue
+        other = (fosc_jl or {}).get((lo_nl, up_nl, Ju, f"{j2}/2"))
+        if other:
+            return (other[0] * (w / (jl2 + 1)) / (wk / (j2 + 1)), other[1], True)
+    return None

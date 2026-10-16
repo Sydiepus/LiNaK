@@ -122,7 +122,15 @@ from alpha_core import (
 from qdt_radial import (
     numerov_fosc_scaled as numerov_fosc_radial,
     fit_numerov_scale_from_nist,
+    fit_numerov_scales_by_type,
+    build_true_multiplet_f,
+    numerov_scale_for,
+    ls_group_branching,
+    ls_line_weight,
+    parse_J2_set,
+    allowed_J2,
 )
+import numpy as _np
 
 _nist = load_nist_fvalues(element, verbose=True)
 nist_fosc    = _nist['fosc']
@@ -269,6 +277,73 @@ def coulomb_fosc(n_upper, l_upper, n_lower, l_lower, delta_upper, delta_lower):
     return max(f, 0.0)
 
 
+NIST_J_6J = True   # fix G: line-level NIST f + 6j completion over lower fine-structure levels
+nist_fosc_jl = _nist.get('fosc_jl') or {}
+
+# Multiplet f rebuilt from NIST LINES (lower-multiplet average). alpha_core's nist_fosc is
+# 1.45-1.48x too large whenever BOTH levels have two J (p->d, d->f, d->p, f->d); it is
+# exact for s->p and p->s. For calibration keep nist_fosc only for those exact types.
+nist_fosc_true = {} if (_is_ion or _is_metal) else build_true_multiplet_f(nist_fosc_jl)
+nist_cal_fosc = dict(nist_fosc_true)
+for _k, _v in (nist_fosc or {}).items():
+    if _k in nist_cal_fosc or not isinstance(_k, tuple):
+        continue
+    _a = re.match(r'^\d+([spdfg])$', _k[0]); _b = re.match(r'^\d+([spdfg])$', _k[1])
+    if _a and _b and 's' in (_a.group(1), _b.group(1)):
+        nist_cal_fosc[_k] = _v
+n_nist_mult_uncorrectable = 0
+
+
+def resolve_multiplet_f(f_mult, lu, ll, J_up, J_lo, wl):
+    """
+    Multiplet f (nl -> n'l', lower-multiplet averaged) -> (fosc, g_upper, g_lower) for
+    the channel upper-group -> lower-group, using LS 6j line strengths. A level label
+    without J is an unresolved multiplet averaged statistically over its fine-structure
+    levels (so no double counting); returns None if the J combination is forbidden.
+        A(Ju -> Jl) = A_mult (2Lu+1)(2Jl+1){Lu Ju 1/2; Jl Ll 1}^2,
+        A_mult = PREF/lambda^2 (2Ll+1)/(2Lu+1) f_mult
+    """
+    ratio, gU, gL = ls_group_branching(lu, parse_J2_set(J_up, lu), ll, parse_J2_set(J_lo, ll))
+    if ratio <= 1e-12:
+        return None
+    A_mult = (EINSTEIN_PREFACTOR / wl**2) * (2*ll + 1) / (2*lu + 1) * f_mult
+    return A_mult * ratio * wl**2 / EINSTEIN_PREFACTOR * gU / gL, gU, gL
+
+
+def nist_line_f(lo_nl, up_nl, lu, J_up, ll, J_lo):
+    """
+    f of one line (L_l, J_l) -> (L_u, J_u): the NIST line itself if listed, else the
+    value implied by another listed lower-J line of the same upper level through the
+    LS 6j ratio  f ~ w(Ju,Jl)/(2Jl+1).  Returns (f, acc, reconstructed) or None when
+    not applicable (lower s level, merged J labels, ions, no line data).
+    """
+    if lu < 0 or ll < 1 or not J_up or not J_lo or ',' in str(J_up) or ',' in str(J_lo):
+        return None
+    ju = parse_J2_set(J_up, lu)
+    jl = parse_J2_set(J_lo, ll)
+    if len(ju) != 1 or len(jl) != 1:
+        return None
+    ju, jl = ju[0], jl[0]
+    w_this = ls_line_weight(lu, ju, ll, jl)
+    if w_this <= 1e-12:
+        return (0.0, None, False)
+    hit = nist_fosc_jl.get((lo_nl, up_nl, J_up, J_lo))
+    if hit:
+        return (hit[0], hit[1], False)
+    for j2 in allowed_J2(ll):
+        if j2 == jl:
+            continue
+        w_k = ls_line_weight(lu, ju, ll, j2)
+        if w_k <= 1e-12:
+            continue
+        Jk = f"{j2}/2"
+        other = nist_fosc_jl.get((lo_nl, up_nl, J_up, Jk))
+        if other:
+            f = other[0] * (w_this / (jl + 1)) / (w_k / (j2 + 1))
+            return (f, other[1], True)
+    return None
+
+
 def degeneracy(l):
     """Degeneracy of orbital l ignoring spin-orbit: 2l+1."""
     return 2 * l + 1
@@ -309,14 +384,20 @@ def default_lower_J(l_char):
 qd = rydberg_data.get('quantum_defects', {})
 _z_core = float(rydberg_data.get('z_core') or (_sp.get('charge', 0) + 1) or 1)
 numerov_scale = 1.0
+_numerov_cal = None
 if _is_metal:
     print("  Skipping Numerov calibration (metal NIST line path)")
 else:
-    _numerov_cal = fit_numerov_scale_from_nist(qd, nist_fosc, z_core=_z_core)
-    numerov_scale = float(_numerov_cal['scale'])
-    print(f"  Numerov NIST-overlap scale = {numerov_scale:.4f} "
-          f"(n_pairs={_numerov_cal['n_pairs']}, applied={_numerov_cal['applied']}, "
-          f"reason={_numerov_cal['reason']}, Z={_z_core:g})")
+    # Per (l_lower, l_upper) scale, fitted only on NIST pairs inside the Numerov
+    # domain (n*_l, n*_u > 2.5); types with <5 inlier pairs use the pooled median.
+    _numerov_cal = fit_numerov_scales_by_type(qd, nist_cal_fosc, z_core=_z_core)
+    numerov_scale = float(_numerov_cal['global']['scale'])
+    print(f"  Numerov NIST-overlap scale (pooled, n*>2.5) = {numerov_scale:.4f} "
+          f"(n_pairs={_numerov_cal['global']['n_pairs']}, Z={_z_core:g})")
+    for (_lo, _up), _inf in sorted(_numerov_cal['types'].items()):
+        _sp_txt = ('' if _inf['rel_spread'] is None else f", spread {100*_inf['rel_spread']:.0f}%")
+        print(f"    {_lo}->{_up}: scale {_inf['scale']:.3f}  "
+              f"(pairs={_inf['n_pairs']}, inliers={_inf['n_inliers']}{_sp_txt}, {_inf['source']})")
 
 transition_table = []
 
@@ -330,7 +411,10 @@ if _gs_meta:
 else:
     gs_label = f"{n_start}s"   # legacy alkali fallback
 
+dropped_log = []   # (transition dict, reason) -- every transition that gets no A
+
 for t in transitions:
+    _drop_reason = None
     wl  = t['wavelength_nm']
     dE  = t['delta_E_eV']
     ul  = t['upper_label']
@@ -462,6 +546,18 @@ for t in transitions:
                 fosc_source = 'precision' if fosc_acc == 'precision' else 'NIST'
                 fosc_delta  = (0.01 if fosc_acc == 'precision'
                                else ACC_UNCERTAINTY.get(fosc_acc, 0.50))
+                if NIST_J_6J and not _is_ion and fosc_source == 'NIST':
+                    _fl = nist_line_f(_ll_nl, _ul_nl, lu, _J_up, ll_int, _J_lo)
+                    if _fl is not None:
+                        _f_line, _acc_line, _recon = _fl
+                        fosc = _f_line
+                        if _acc_line:
+                            fosc_acc = _acc_line
+                        fosc_delta = ACC_UNCERTAINTY.get(fosc_acc, 0.50)
+                        if _recon:   # completed with the LS 6j ratio: add 5 % model error
+                            fosc_delta = (fosc_delta**2 + 0.05**2) ** 0.5
+                        if _f_line <= 0:
+                            _drop_reason = 'forbidden_dJ (|J_u-J_l|>1)'
                 _gJ_u = J_degeneracy(_J_up)
                 _gJ_l = J_degeneracy(_J_lo)
                 if _gJ_u:
@@ -473,13 +569,28 @@ for t in transitions:
             _key  = (_ll_nl, _ul_nl)
             _key2 = (_ul_nl, _ll_nl)
             _f    = nist_fosc.get(_key) or nist_fosc.get(_key2)
+            _k    = _key if _key in nist_fosc else _key2
+            _resolved = None
+            if _f and _f > 0 and not _is_ion and lu >= 0 and ll_int >= 0:
+                _ft = nist_fosc_true.get(_key) or nist_fosc_true.get(_key2)
+                if _ft:
+                    _f = _ft
+                elif lu >= 1 and ll_int >= 1:
+                    _f = None                      # overcounted multiplet, cannot be corrected
+                    n_nist_mult_uncorrectable += 1
+                if _f and _f > 0:
+                    _resolved = resolve_multiplet_f(_f, lu, ll_int, _J_up, _J_lo, wl)
+                    if _resolved is None:
+                        _f = None
+                        _drop_reason = 'forbidden_dJ (|J_u-J_l|>1 within the LS multiplet)'
             if _f and _f > 0:
                 fosc        = _f
                 fosc_source = 'NIST'
-                _k          = _key if _key in nist_fosc else _key2
                 fosc_acc    = nist_acc.get(_k, 'unknown')
                 fosc_delta  = (0.01 if fosc_acc == 'precision'
                                else ACC_UNCERTAINTY.get(fosc_acc, 0.50))
+                if _resolved is not None:
+                    fosc, g_upper, g_lower = _resolved
 
     # Priority 1b: curated literature overlay
     if fosc is None and (literature_fosc_j or literature_fosc) and not args.orca_only:
@@ -553,35 +664,39 @@ for t in transitions:
                 fosc_delta  = 0.05
 
     #QD Numerov radial (preferred theoretical fallback; alkalis only)
+    # The Numerov f is a MULTIPLET (LS-averaged) absorption f for nl -> n'l'.
+    # It is resolved into fine structure with LS 6j line strengths:
+    #   A(Ju -> Jl) = A_mult * (2Lu+1)(2Jl+1){Lu Ju 1/2; Jl Ll 1}^2
+    # where A_mult = PREF/lambda^2 * (2Ll+1)/(2Lu+1) * f is the rate of any one
+    # upper level of the multiplet to the whole lower multiplet. A level label
+    # without J (ns, 21p, 21d, ...) is an unresolved multiplet and is averaged
+    # statistically over its fine-structure levels (no double counting).
     if fosc is None and not args.orca_only and not _is_metal:
         delta_u = qd.get(lu_char, 0.0)
         delta_l = qd.get(ll_char, 0.0)
         n_eff_u = nu - delta_u
         n_eff_l = nl - delta_l
         f_num = 0.0
-        if n_eff_u > 2.5 and n_eff_l > 2.5:
+        if n_eff_u > 2.5 and n_eff_l > 2.5 and lu >= 0 and ll_int >= 0:
             try:
-                f_num = numerov_fosc_radial(nu, lu, nl, ll_int, delta_u, delta_l,
-                                            scale=numerov_scale, z_core=_z_core)
+                f_num = numerov_fosc_radial(
+                    nu, lu, nl, ll_int, delta_u, delta_l,
+                    scale=numerov_scale_for(_numerov_cal, ll_char, lu_char),
+                    z_core=_z_core)
             except Exception:
                 f_num = 0.0
         if f_num and f_num > 0:
-            fosc        = f_num
             fosc_source = 'Numerov'
             fosc_delta  = 0.15 if (n_eff_u > 4 and n_eff_l > 4) else 0.25
-            # Optional J-weight split for multiplet-averaged Numerov f
-            if _J_up and lu >= 1:
-                _gJ_u = J_degeneracy(_J_up)
-                if _gJ_u:
-                    g_J_total = 2 * (2 * lu + 1)
-                    fosc = fosc * _gJ_u / g_J_total
-                    g_upper = _gJ_u
-                _gJ_l = J_degeneracy(_J_lo)
-                if _gJ_l:
-                    g_lower = _gJ_l
+            _res = resolve_multiplet_f(f_num, lu, ll_int, _J_up, _J_lo, wl)
+            if _res is None:
+                fosc = None
+                _drop_reason = 'forbidden_dJ (|J_u-J_l|>1 within the LS multiplet)'
+            else:
+                fosc, g_upper, g_lower = _res
 
     #Coulomb approximation (last resort; alkalis only)
-    if fosc is None and not args.orca_only and not _is_metal:
+    if fosc is None and _drop_reason is None and not args.orca_only and not _is_metal:
         delta_u = qd.get(lu_char, 0.0)
         delta_l = qd.get(ll_char, 0.0)
         n_eff_u = nu - delta_u
@@ -600,6 +715,19 @@ for t in transitions:
             fosc_delta  = 1.00
 
     if fosc is None or fosc <= 0:
+        if _drop_reason is None:
+            _du = qd.get(lu_char, 0.0) if lu_char else 0.0
+            _dl = qd.get(ll_char, 0.0) if ll_char else 0.0
+            _nsu, _nsl = nu - _du, nl - _dl
+            if lu < 0 or ll_int < 0 or abs(lu - ll_int) != 1:
+                _drop_reason = 'not_E1_or_unlabelled'
+            elif not (_nsu > 2.5 and _nsl > 2.5):
+                _drop_reason = 'below_numerov_gate (n*<=2.5, no NIST f)'
+            elif (_nsu**2 - _nsl**2) < 0.5 * _nsu:
+                _drop_reason = 'near_degenerate_guard (Coulomb/Numerov)'
+            else:
+                _drop_reason = 'f<=0 or radial integral failed'
+        dropped_log.append((t, _drop_reason))
         continue
 
     # A_ul = PREFACTOR / lambda_nm^2 * (g_l/g_u) * f_lu
@@ -625,6 +753,137 @@ for t in transitions:
         'A_s':           A,
         'sigma_A_s':     sigma_A,
     })
+
+# ---------------------------------------------------------------------------
+# NIST EXTRAPOLATION (fix B)
+# Lower levels below the Numerov gate (Na 3s, 3p) have NIST f only up to some
+# n_max. Beyond it the pipeline used to drop the channel, although for high n
+# these are the DOMINANT decay channels of np/nd states. QDT scaling gives
+#       f * n*^3  =  a + b / n*^2          (smooth in n*)
+# which is fitted per J-resolved series on the last K NIST points and used only
+# when (i) >= K points exist, (ii) the in-sample rms is < 5 %, (iii) y > 0.
+# Hold-out tests on Na (fit n<=N, predict N+1..N+4) give 0.4-3 % rms.
+# ---------------------------------------------------------------------------
+_EXTRAP_K = 6
+_EXTRAP_MAX_RMS = 0.05
+_extrap_info = {}
+n_extrapolated = 0
+
+
+def _split_J_tag(label, n):
+    m = re.match(rf'^{n}[spdfg](\d+/\d+)$', label or '')
+    return m.group(1) if m else ''
+
+
+def _build_extrap_fits(lowers):
+    """Fit y = f n*^3 = a + b/n*^2 for every (lower_label, upper_l, J_tag) NIST series."""
+    series = defaultdict(dict)
+    for tt in transition_table:
+        if tt['fosc_source'] not in ('NIST', 'precision') or tt['lower_label'] not in lowers:
+            continue
+        lc = tt['upper_l']
+        if lc not in qd or tt['upper_n'] is None:
+            continue
+        Jt = _split_J_tag(tt['upper_label'], tt['upper_n']) if lc != 's' else ''
+        series[(tt['lower_label'], lc, Jt)][tt['upper_n']] = (tt['fosc'], tt.get('fosc_delta') or 0.25)
+    fits = {}
+    for key, d in series.items():
+        ns_ = sorted(d)
+        if len(ns_) < _EXTRAP_K:
+            continue
+        ns_ = ns_[-_EXTRAP_K:]
+        x = _np.array([n - qd[key[1]] for n in ns_])
+        y = _np.array([d[n][0] * (n - qd[key[1]])**3 for n in ns_])
+        M = _np.vstack([_np.ones_like(x), 1.0 / x**2]).T
+        c = _np.linalg.lstsq(M, y, rcond=None)[0]
+        rms = float(_np.sqrt(_np.mean((M @ c / y - 1.0)**2)))
+        if rms < _EXTRAP_MAX_RMS:
+            fits[key] = dict(c=c, n_max=max(ns_), rms=rms, delta=d[ns_[-1]][1],
+                             n_pts=len(ns_))
+    return fits
+
+
+_gate_drops = [(tt, r) for tt, r in dropped_log if r.startswith('below_numerov_gate')]
+if _gate_drops and not _is_metal:
+    _lowers = {tt['lower_label'] for tt, _ in _gate_drops}
+    _fits = _build_extrap_fits(_lowers)
+    _still = []
+    _recovered = set()
+    for idx, (tt, r) in enumerate(dropped_log):
+        if not r.startswith('below_numerov_gate'):
+            continue
+        ul_, ll_, n_, lc_ = tt['upper_label'], tt['lower_label'], tt['upper_n'], tt['upper_l']
+        wl_ = tt['wavelength_nm']
+        lu_ = L_CHAR.get(lc_, -1)
+        if lu_ < 0 or lc_ not in qd:
+            continue
+        Jtag = _split_J_tag(ul_, n_) if lc_ != 's' else ''
+        if lc_ == 's':
+            comps = [('', 2)]
+        elif Jtag:
+            comps = [(Jtag, J_degeneracy(Jtag))]
+        else:
+            comps = [(f'{j}/2', j + 1) for j in allowed_J2(lu_)]
+        _J_lo_ = tt.get('lower_J') or parse_J_label(ll_) or default_lower_J(tt['lower_l'])
+        g_l_ = J_degeneracy(_J_lo_) or (2 * L_CHAR.get(tt['lower_l'], 0) + 1)
+        ns_u = n_ - qd[lc_]
+        A_sum, g_sum, used = 0.0, 0.0, []
+        for Jc, gu_c in comps:
+            key = (ll_, lc_, Jc)
+            fit = _fits.get(key)
+            if fit is None or n_ <= fit['n_max']:
+                continue
+            y = fit['c'][0] + fit['c'][1] / ns_u**2
+            if y <= 0:
+                continue
+            f_c = y / ns_u**3
+            A_c = EINSTEIN_PREFACTOR / wl_**2 * (g_l_ / gu_c) * f_c
+            w_c = gu_c if not Jtag and lc_ != 's' else 1.0
+            A_sum += A_c * w_c
+            used.append((Jc, fit))
+        if not used:
+            continue
+        if not Jtag and lc_ != 's':
+            g_up = 2 * (2 * lu_ + 1)
+            A_ch = A_sum / g_up
+        else:
+            g_up = comps[0][1]
+            A_ch = A_sum
+        f_eff = A_ch * wl_**2 / EINSTEIN_PREFACTOR * g_up / g_l_
+        rms = max(fit['rms'] for _, fit in used)
+        dnist = max(fit['delta'] for _, fit in used)
+        d_ex = (dnist**2 + rms**2)**0.5
+        transition_table.append({
+            'upper_label':   ul_, 'lower_label': ll_,
+            'upper_n':       n_,  'lower_n': tt['lower_n'],
+            'upper_l':       lc_, 'lower_l': tt['lower_l'],
+            'wavelength_nm': wl_, 'delta_E_eV': tt['delta_E_eV'],
+            'region':        tt['region'],
+            'fosc':          f_eff,
+            'fosc_source':   'NIST-extrap',
+            'fosc_acc':      f"extrap(n>{max(f['n_max'] for _, f in used)}, rms {100*rms:.1f}%)",
+            'fosc_delta':    d_ex,
+            'g_upper':       g_up, 'g_lower': g_l_,
+            'A_s':           A_ch,
+            'sigma_A_s':     A_ch * d_ex,
+        })
+        n_extrapolated += 1
+        _recovered.add(idx)
+    dropped_log = [e for i, e in enumerate(dropped_log) if i not in _recovered]
+    for (lo_, lc_, Jc), fit in _fits.items():
+        _extrap_info[f"{lo_}->{lc_}{Jc}"] = dict(n_fit_max=int(fit['n_max']), n_points=fit['n_pts'],
+                                                a=float(fit['c'][0]), b=float(fit['c'][1]),
+                                                rms=fit['rms'])
+    print(f"  NIST-extrapolated channels (3s/3p-type lowers beyond NIST n_max): {n_extrapolated}")
+
+# Dropped-transition log (fix C)
+_drop_counts = defaultdict(int)
+for _t, _r in dropped_log:
+    _drop_counts[_r] += 1
+if _drop_counts:
+    print(f"  Transitions with NO A coefficient: {sum(_drop_counts.values())} of {len(transitions)}")
+    for _r, _c in sorted(_drop_counts.items(), key=lambda kv: -kv[1]):
+        print(f"      {_c:>6}  {_r}")
 
 print(f"  Transitions with A coefficients: {len(transition_table)}")
 
@@ -880,6 +1139,18 @@ output = {
     'n_transitions':     len(transition_table),
     'lifetimes':         lifetime_table,
     'transitions':       transition_table,
+    'numerov_calibration': (None if _numerov_cal is None else {
+        'pooled': _numerov_cal['global'],
+        'by_type': {f"{k[0]}->{k[1]}": v for k, v in _numerov_cal['types'].items()},
+    }),
+    'nist_extrapolation': {'n_channels': n_extrapolated, 'series': _extrap_info},
+    'dropped_transitions': {
+        'n_total': sum(_drop_counts.values()),
+        'by_reason': dict(_drop_counts),
+        'examples': [{'upper': _t['upper_label'], 'lower': _t['lower_label'],
+                      'wavelength_nm': _t['wavelength_nm'], 'reason': _r}
+                     for _t, _r in dropped_log[:25]],
+    },
 }
 
 out_file = f"data_json/{element}_lifetimes.json"
@@ -996,7 +1267,7 @@ print(f"\n{'='*65}\n")
 
 # Show for all states with NIST or ORCA dominant source (reliable A values)
 reliable = [lt for lt in lifetime_table
-            if lt['dominant_source'] in ('NIST', 'ORCA', 'literature', 'Numerov', 'precision')]
+            if lt['dominant_source'] in ('NIST', 'ORCA', 'literature', 'Numerov', 'precision', 'NIST-extrap')]
 
 if reliable:
     print(f"\n{'='*115}")

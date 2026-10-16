@@ -10,13 +10,15 @@ Main  : |ψ|² (or Re ψ / Im ψ / phase) raymarched from a 3D texture, with axe
 Physics model (what is and is not exact)
 ----------------------------------------
 Radial   : the decaying Coulomb (Whittaker) radial function at the energy
-           E = -1/(2 n*²), n* = n − δ_l (quantum-defect theory), obtained by
-           stable inward Numerov integration of the radial equation. For
+           E = -Z²/(2 n*²), n* = n − δ_l (quantum-defect theory), obtained by
+           stable inward Numerov integration of the radial equation. For ions
+           (core charge Z = z_core, e.g. Na+ -> 2) the Z = 1 solution is
+           rescaled hydrogenically, R(r) = f(Z r), box and r_c scale as 1/Z. For
            integer n* it is identical to the hydrogenic function (checked to
            ~1e-6); for non-integer n* it has the correct node count/positions
            (the old truncated-Laguerre form did not: e.g. Na 6d had 2 radial
            nodes instead of 3). Valid outside the ionic core. Inside the core
-           radius r_c = max(inner classical turning point, 1 a0) the real
+           radius r_c = max(inner classical turning point, 1/Z a0) the real
            wavefunction is not hydrogenic and is NOT modelled here: it is
            continued as R ∝ r^l (marked in the info panel).
 Angular  : • J-resolved levels (nl_J): spin-orbit (j-coupled) spinors
@@ -102,6 +104,9 @@ with open(ryd_file) as f: rydberg = json.load(f)
 
 IE   = rydberg["ionization_energy_eV"]
 qd   = rydberg.get("quantum_defects", {})
+# Effective core charge seen by the Rydberg electron (1 for neutrals, 2 for X+, ...).
+# Same rule as lifetimes.py: z_core from the rydberg JSON, else charge + 1.
+Z_CORE = float(rydberg.get("z_core") or (_species.get("charge", 0) + 1) or 1)
 gs_n = rydberg.get("n_start", 2)
 
 lt_file = os.path.join(args.data_dir, f"{element}_lifetimes.json")
@@ -1107,12 +1112,14 @@ function rhoMj(l, jTwice, mjTwice, cosT) {
 
 self.onmessage = function (e) {
   const { l, neff, GRID, A0, kind, m, mjTwice, jTwice, basis, maxN } = e.data;
-  const rMax = Math.min(neff * neff * 2.2 + 10, neff * neff * 3.0);
+  const Z = e.data.Z || 1;                                    // core charge (hydrogenic scaling r -> Z r)
+  const rMaxRho = Math.min(neff * neff * 2.2 + 10, neff * neff * 3.0);   // box half-width in Z*r units
+  const rMax = rMaxRho / Z;                                   // physical half-width (a0)
   const rAng = rMax * A0;
   const N = Math.min(GRID + l * 4, maxN || 128);
   const co = new Float64Array(N);
   for (let i = 0; i < N; i++) co[i] = -rMax + 2 * rMax * i / (N - 1);
-  const rad = buildRadial(neff, l, rMax);
+  const rad = buildRadial(neff, l, rMaxRho);   // Z = 1 radial problem in rho = Z r
   const tot = N * N * N;
   const data = new Float32Array(tot * 4);
   let idx = 0, mx = 0;
@@ -1125,7 +1132,7 @@ self.onmessage = function (e) {
         const b = idx * 4;
         data[b + 3] = 1.0;
         if (r >= rMax) continue;
-        const Rv = rad.f(r), R2 = Rv * Rv, cosT = cz / r;
+        const Rv = rad.f(Z * r), R2 = Rv * Rv, cosT = cz / r;
         let d = 0, re = 0, im = 0;
         if (kind === 'sum') d = R2;
         else if (kind === 'sph') d = R2 * r2;
@@ -1144,7 +1151,7 @@ self.onmessage = function (e) {
     const invD = 1 / mx, invA = 1 / Math.sqrt(mx);
     for (let i = 0; i < tot; i++) { const b = i * 4; data[b] *= invD; data[b + 1] *= invA; data[b + 2] *= invA; }
   }
-  self.postMessage({ data, rAng, grid: N, rc: rad.rc * A0 }, [data.buffer]);
+  self.postMessage({ data, rAng, grid: N, rc: rad.rc / Z * A0 }, [data.buffer]);
 };`;
 
   function parseMk(mk){
@@ -1196,7 +1203,7 @@ self.onmessage = function (e) {
         '<br><span style="color:#e07;font-size:10px">⚠ Worker error: ' + err.message + '</span>';
       worker.terminate();
     };
-    worker.postMessage({l:cur.lint, neff:cur.neff, GRID:__GRID_DEFAULT__, maxN:__MAXN__, A0:A0,
+    worker.postMessage({l:cur.lint, neff:cur.neff, GRID:__GRID_DEFAULT__, maxN:__MAXN__, A0:A0, Z:__ZCORE__,
       kind:pm.kind, m:pm.m, mjTwice:pm.mjTwice, jTwice:cur.jt, basis:basis});
   }
 
@@ -1407,6 +1414,7 @@ html = html.replace("__RENDER_BODY__", _ISO_BODY if RENDER == "isosurface" else 
 html = html.replace("__RENDER_CONTROLS__", _ISO_CTRL if RENDER == "isosurface" else _VOL_CTRL)
 html = html.replace("__RENDER__", RENDER)
 html = html.replace("__MAXN__", str(MAXN))
+html = html.replace("__ZCORE__", repr(Z_CORE))
 html = html.replace("__SPECIES__", species_label)
 html = html.replace("__STATE_COUNT__", str(len(nodes)))
 html = html.replace("__STATE_ROWS__", _STATE_ROWS)
