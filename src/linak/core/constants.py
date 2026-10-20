@@ -54,11 +54,8 @@ AU_TIME_S       = 2.4188843265857e-17   # ħ / E_h  (s)
 
 # α_SI = α_au · 4πε₀ a₀³
 AU_TO_SI_ALPHA  = 4.0 * math.pi * EPS0_SI * A0_SI**3
-# Rounded compact form still used in some displays / docs
-AU_TO_SI_ALPHA_ROUNDED = 1.6488e-41
 # C₆_SI = C₆_au · E_h a₀⁶
 AU_TO_SI_C6     = 9.573448e-80
-AU_TO_ANGSTROM3 = (0.529177)**3
 
 
 # SPECTROSCOPY
@@ -72,7 +69,6 @@ NIST_PREF          = EINSTEIN_PREFACTOR  # alias (alpha_core / ASD loader)
 
 MU_B_MHz_G  = 1.399624604               # MHz/G  (μ_B / h)
 MU_N_MHz_G  = 7.622593285e-4            # MHz/G  (μ_N / h)
-MU_B_HZ_T   = 9.2740100783e9            # Hz/T
 
 
 # BBR / THERMAL FIELD (Itano, Lewis & Wineland 1982)

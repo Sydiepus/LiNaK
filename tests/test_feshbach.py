@@ -5,8 +5,9 @@ from __future__ import annotations
 import math
 
 import numpy as np
+import pytest
 
-from linak.physics.feshbach import multi_resonance_a, scattering_length
+from linak.physics.feshbach import Resonance, multi_resonance_a, scattering_length
 
 from helpers import write_result_summary
 
@@ -52,11 +53,47 @@ def test_scattering_length_zero_and_background(anchors, results_dir):
     )
 
 
-def test_multi_resonance_product_near_background(na_feshbach_params, anchors):
+def test_multi_resonance_product_near_background(na_feshbach_params):
     """Far below all poles, multi-resonance a(B) recovers a_bg."""
-    a = anchors["feshbach"]
     a_bg = float(na_feshbach_params["a_bg_default_a0"])
     B = np.array([0.0, 10.0, 50.0])
-    vals = multi_resonance_a(B, na_feshbach_params["resonances"], a_bg)
+    resonances = [Resonance.from_json(row) for row in na_feshbach_params["resonances"]]
+    vals = multi_resonance_a(B, resonances, a_bg)
     for v in vals:
         assert abs(float(v) - a_bg) / abs(a_bg) < 0.02
+
+
+# --- engine (physics.feshbach) --------------------------------------------
+
+
+def test_van_der_waals_length_matches_chin_2010_for_rb87():
+    """R_vdW = β₆/2 = 82.6 a₀ for ⁸⁷Rb with C₆ = 4698 au (Chin et al., RMP 82, 1225)."""
+    from linak.physics.feshbach import beta6_a0
+
+    assert beta6_a0(4698.0, 86.909180527) / 2 == pytest.approx(82.6, rel=2e-3)
+
+
+def test_compute_single_resonance_combined_equals_isolated():
+    from linak.physics.feshbach import Resonance, compute
+
+    res = Resonance.from_json({"B0_G": 907.0, "Delta_G": 1.0, "a_bg_a0": 63.0})
+    result = compute([res], 63.0, 1556.0, 22.98976928, kT_uK=1.0, B_points=500)
+    assert result.B_G[-1] == pytest.approx(907.0 * 1.15), "default range: 15 % past B₀"
+    np.testing.assert_allclose(result.a_combined_a0, result.curves[0].a_a0, equal_nan=True)
+    assert result.curves[0].resonance.label == "B0=907.0G"
+    assert result.curves[0].a_bg_a0 == 63.0
+
+
+def test_cross_section_is_4_pi_a_squared_at_low_energy():
+    """σ_el → 4πa² for k·a ≪ 1 (distinguishable-particle form, see P25)."""
+    from linak.physics.feshbach import sigma_el_a0
+
+    assert float(sigma_el_a0(50.0, 1e-8)) == pytest.approx(4 * math.pi * 50.0**2, rel=1e-9)
+
+
+def test_resonance_without_own_background_uses_the_table_default():
+    from linak.physics.feshbach import Resonance
+
+    res = Resonance.from_json({"label": "x", "B0_G": 10, "Delta_G": 0.5})
+    assert res.a_bg_a0 is None and res.background(54.5) == 54.5
+    assert (res.partial_wave, res.channel, res.ref) == ("s", "", "")
